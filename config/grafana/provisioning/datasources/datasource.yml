@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: Elasticsearch
+    uid: elasticsearch
+    type: elasticsearch
+    access: proxy
+    url: http://elasticsearch:9200
+    database: kafka-burrow-metrics-*
+    jsonData:
+      index: kafka-burrow-metrics-*
+      interval: Daily
+      timeField: "@timestamp"
+      esVersion: 8.0.0
+    isDefault: true
+    editable: false
