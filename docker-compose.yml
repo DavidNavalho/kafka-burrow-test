@@ -53,6 +53,27 @@ services:
       - "--group.filter=^demo-.*$"
       - "--offset.show-all"
 
+  klag:
+    image: themoah/klag:0.1.8-main
+    platform: linux/amd64
+    entrypoint:
+      - java
+      - -cp
+      - /app/config:app.jar
+      - io.github.themoah.klag.KlagLauncher
+    depends_on:
+      - kafka
+      - topic-init
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./config/klag/application.properties:/app/config/application.properties:ro
+    environment:
+      METRICS_REPORTER: prometheus
+      METRICS_INTERVAL_MS: 10000
+      METRICS_GROUP_FILTER: demo-*
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
     restart: unless-stopped
@@ -72,11 +93,13 @@ services:
       - elasticsearch
       - kafka-exporter
       - burrow
+      - klag
     restart: unless-stopped
     environment:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       KAFKA_EXPORTER_URL: http://kafka-exporter:9308/metrics
       BURROW_BASE_URL: http://burrow:8000
+      KLAG_METRICS_URL: http://klag:8888/metrics
       INDEX_PREFIX: kafka-burrow-metrics
       POLL_INTERVAL_SECONDS: 5
       REQUEST_TIMEOUT_SECONDS: 5
@@ -93,7 +116,7 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
     volumes:
       - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
@@ -113,6 +136,7 @@ services:
       PRODUCE_INTERVAL_SLOW_SECONDS: 0.25
       PRODUCE_INTERVAL_STOPPED_SECONDS: 0.35
       PRODUCE_INTERVAL_BURSTY_SECONDS: 0.05
+      PRODUCE_INTERVAL_RISK_SECONDS: 0.08
       HEALTHY_CONSUMER_MAX_POLL_RECORDS: 500
       HEALTHY_CONSUMER_BATCH_SLEEP_SHORT_SECONDS: 0.15
       HEALTHY_CONSUMER_BATCH_SLEEP_LONG_SECONDS: 1.2
@@ -125,11 +149,17 @@ services:
       BURSTY_CONSUMER_SLOW_SLEEP_SECONDS: 1.3
       BURSTY_CONSUMER_CYCLE_SECONDS: 70
       BURSTY_CONSUMER_FAST_SECONDS: 25
+      RISK_CONSUMER_MAX_POLL_RECORDS: 200
+      RISK_CONSUMER_ACTIVE_SECONDS: 35
+      RISK_CONSUMER_PAUSE_SECONDS: 150
+      RISK_CONSUMER_ACTIVE_SLEEP_SECONDS: 0.08
       HEALTHY_TOPIC: demo.healthy
       SLOW_TOPIC: demo.slow
       STOPPED_TOPIC: demo.stopped
       BURSTY_TOPIC: demo.bursty
+      RISK_TOPIC: demo.risk
       HEALTHY_GROUP: demo-healthy-group
       SLOW_GROUP: demo-slow-group
       STOPPED_GROUP: demo-stopped-group
       BURSTY_GROUP: demo-bursty-group
+      RISK_GROUP: demo-risk-group

@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -36,6 +37,16 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "5"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "5"))
 GROUP_REGEX = re.compile(os.getenv("GROUP_REGEX", r"^demo-.*"))
 TOPIC_REGEX = re.compile(os.getenv("TOPIC_REGEX", r"^demo\..*"))
+KLAG_METRICS_URL = os.getenv("KLAG_METRICS_URL", "http://klag:8888/metrics")
+
+KLAG_GROUP_STATE_CODE = {
+    "stable": 0,
+    "completing_rebalance": 1,
+    "preparing_rebalance": 2,
+    "empty": 3,
+    "dead": 4,
+    "unknown": 5,
+}
 
 PREV_CONSUMED: Dict[str, Tuple[float, float]] = {}
 
@@ -101,7 +112,10 @@ def ensure_index_template() -> None:
 def parse_prometheus_samples(metrics_text: str) -> Iterable[Tuple[str, Dict[str, str], float]]:
     for family in text_string_to_metric_families(metrics_text):
         for sample in family.samples:
-            yield sample.name, sample.labels, float(sample.value)
+            value = float(sample.value)
+            if not math.isfinite(value):
+                continue
+            yield sample.name, sample.labels, value
 
 
 def scrape_kafka_exporter(ts_iso: str) -> List[Dict]:
@@ -349,6 +363,100 @@ def scrape_burrow(ts_iso: str) -> List[Dict]:
     return docs
 
 
+def klag_retention_risk(percent: float) -> Tuple[int, str]:
+    if percent < 40.0:
+        return 0, "GREEN"
+    if percent < 80.0:
+        return 1, "YELLOW"
+    return 2, "RED"
+
+
+def scrape_klag(ts_iso: str) -> List[Dict]:
+    response = requests.get(KLAG_METRICS_URL, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    docs: List[Dict] = []
+    allowed_metrics = {
+        "klag_consumer_lag",
+        "klag_consumer_lag_sum",
+        "klag_consumer_lag_min",
+        "klag_consumer_lag_max",
+        "klag_consumer_lag_ms",
+        "klag_consumer_lag_velocity",
+        "klag_consumer_lag_retention_percent",
+        "klag_consumer_group_state",
+        "klag_consumer_committed_offset",
+        "klag_partition_log_start_offset",
+        "klag_partition_log_end_offset",
+    }
+
+    for name, labels, value in parse_prometheus_samples(response.text):
+        if name not in allowed_metrics:
+            continue
+
+        group = labels.get("consumer_group", "")
+        topic = labels.get("topic", "")
+        partition = labels.get("partition")
+        state = labels.get("state", "")
+
+        if group and not GROUP_REGEX.match(group):
+            continue
+        if topic and not TOPIC_REGEX.match(topic):
+            continue
+
+        doc: Dict = {
+            "@timestamp": ts_iso,
+            "source": "klag",
+            "metric": name,
+            "value": value,
+        }
+
+        if group:
+            doc["group"] = group
+        if topic:
+            doc["topic"] = topic
+        if partition not in (None, ""):
+            try:
+                doc["partition"] = int(partition)
+            except ValueError:
+                pass
+        if state:
+            doc["state"] = state
+
+        docs.append(doc)
+
+        if name == "klag_consumer_group_state" and group and state:
+            state_code = KLAG_GROUP_STATE_CODE.get(state.lower(), KLAG_GROUP_STATE_CODE["unknown"])
+            docs.append(
+                {
+                    "@timestamp": ts_iso,
+                    "source": "klag",
+                    "metric": "klag_consumer_group_state_code",
+                    "group": group,
+                    "status": state.upper(),
+                    "status_code": state_code,
+                    "value": float(state_code),
+                }
+            )
+
+        if name == "klag_consumer_lag_retention_percent" and group:
+            risk_code, risk_label = klag_retention_risk(value)
+            risk_doc: Dict = {
+                "@timestamp": ts_iso,
+                "source": "klag",
+                "metric": "klag_retention_risk_code",
+                "group": group,
+                "status": risk_label,
+                "status_code": risk_code,
+                "value": float(risk_code),
+            }
+            if topic:
+                risk_doc["topic"] = topic
+            docs.append(risk_doc)
+
+    return docs
+
+
 def bulk_index(docs: List[Dict]) -> None:
     if not docs:
         return
@@ -391,6 +499,11 @@ def run_once() -> None:
         LOGGER.error("Failed scraping Burrow: %s", error)
 
     try:
+        docs.extend(scrape_klag(timestamp))
+    except Exception as error:  # pylint: disable=broad-except
+        LOGGER.error("Failed scraping KLag: %s", error)
+
+    try:
         bulk_index(docs)
     except Exception as error:  # pylint: disable=broad-except
         LOGGER.error("Failed indexing docs: %s", error)
@@ -400,6 +513,7 @@ def main() -> None:
     wait_for_endpoint(f"{ELASTICSEARCH_URL}", "Elasticsearch")
     wait_for_endpoint(KAFKA_EXPORTER_URL, "kafka-exporter")
     wait_for_endpoint(f"{BURROW_BASE_URL}/v3/kafka", "Burrow")
+    wait_for_endpoint(KLAG_METRICS_URL, "KLag metrics")
 
     ensure_index_template()
 

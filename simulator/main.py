@@ -32,6 +32,9 @@ PRODUCE_INTERVAL_STOPPED_SECONDS = float(
 PRODUCE_INTERVAL_BURSTY_SECONDS = float(
     os.getenv("PRODUCE_INTERVAL_BURSTY_SECONDS", PRODUCE_INTERVAL_SECONDS)
 )
+PRODUCE_INTERVAL_RISK_SECONDS = float(
+    os.getenv("PRODUCE_INTERVAL_RISK_SECONDS", PRODUCE_INTERVAL_SECONDS)
+)
 
 HEALTHY_CONSUMER_MAX_POLL_RECORDS = int(
     os.getenv("HEALTHY_CONSUMER_MAX_POLL_RECORDS", "1200")
@@ -67,16 +70,30 @@ BURSTY_CONSUMER_CYCLE_SECONDS = float(
 BURSTY_CONSUMER_FAST_SECONDS = float(
     os.getenv("BURSTY_CONSUMER_FAST_SECONDS", "24")
 )
+RISK_CONSUMER_MAX_POLL_RECORDS = int(
+    os.getenv("RISK_CONSUMER_MAX_POLL_RECORDS", "200")
+)
+RISK_CONSUMER_ACTIVE_SECONDS = float(
+    os.getenv("RISK_CONSUMER_ACTIVE_SECONDS", "35")
+)
+RISK_CONSUMER_PAUSE_SECONDS = float(
+    os.getenv("RISK_CONSUMER_PAUSE_SECONDS", "150")
+)
+RISK_CONSUMER_ACTIVE_SLEEP_SECONDS = float(
+    os.getenv("RISK_CONSUMER_ACTIVE_SLEEP_SECONDS", "0.08")
+)
 
 HEALTHY_TOPIC = os.getenv("HEALTHY_TOPIC", "demo.healthy")
 SLOW_TOPIC = os.getenv("SLOW_TOPIC", "demo.slow")
 STOPPED_TOPIC = os.getenv("STOPPED_TOPIC", "demo.stopped")
 BURSTY_TOPIC = os.getenv("BURSTY_TOPIC", "demo.bursty")
+RISK_TOPIC = os.getenv("RISK_TOPIC", "demo.risk")
 
 HEALTHY_GROUP = os.getenv("HEALTHY_GROUP", "demo-healthy-group")
 SLOW_GROUP = os.getenv("SLOW_GROUP", "demo-slow-group")
 STOPPED_GROUP = os.getenv("STOPPED_GROUP", "demo-stopped-group")
 BURSTY_GROUP = os.getenv("BURSTY_GROUP", "demo-bursty-group")
+RISK_GROUP = os.getenv("RISK_GROUP", "demo-risk-group")
 
 
 def install_signal_handlers() -> None:
@@ -240,6 +257,42 @@ def bursty_consumer_loop() -> None:
     consumer.close()
 
 
+def risk_consumer_loop() -> None:
+    consumer = build_consumer(
+        RISK_TOPIC,
+        RISK_GROUP,
+        max_poll_records=RISK_CONSUMER_MAX_POLL_RECORDS,
+    )
+    started = time.time()
+    cycle_seconds = max(1.0, RISK_CONSUMER_ACTIVE_SECONDS + RISK_CONSUMER_PAUSE_SECONDS)
+    paused = False
+
+    while not STOP_EVENT.is_set():
+        elapsed = time.time() - started
+        cycle_position = elapsed % cycle_seconds
+        active = cycle_position < RISK_CONSUMER_ACTIVE_SECONDS
+
+        if active:
+            if paused:
+                LOGGER.info("Risk consumer resumed after pause to catch up")
+                paused = False
+            records = consumer.poll(timeout_ms=1000)
+            count = sum(len(batch) for batch in records.values())
+            if count > 0:
+                consumer.commit()
+            time.sleep(RISK_CONSUMER_ACTIVE_SLEEP_SECONDS)
+        else:
+            if not paused:
+                LOGGER.info(
+                    "Risk consumer entering pause window for %.1fs to cross retention",
+                    RISK_CONSUMER_PAUSE_SECONDS,
+                )
+                paused = True
+            time.sleep(1)
+
+    consumer.close()
+
+
 def run_thread(name: str, target) -> threading.Thread:
     thread = threading.Thread(target=target, name=name, daemon=True)
     thread.start()
@@ -263,6 +316,10 @@ def main() -> None:
             "producer-bursty",
             lambda: producer_loop(BURSTY_TOPIC, PRODUCE_INTERVAL_BURSTY_SECONDS),
         ),
+        run_thread(
+            "producer-risk",
+            lambda: producer_loop(RISK_TOPIC, PRODUCE_INTERVAL_RISK_SECONDS),
+        ),
     ]
 
     # Allow producers to seed data so consumers create committed offsets quickly.
@@ -273,6 +330,7 @@ def main() -> None:
         run_thread("consumer-slow", slow_consumer_loop),
         run_thread("consumer-stopped", stopped_consumer_loop),
         run_thread("consumer-bursty", bursty_consumer_loop),
+        run_thread("consumer-risk", risk_consumer_loop),
     ]
 
     all_threads = producer_threads + consumer_threads
