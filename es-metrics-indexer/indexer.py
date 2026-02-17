@@ -478,6 +478,10 @@ def scrape_klag(ts_iso: str) -> List[Dict]:
     response.raise_for_status()
 
     docs: List[Dict] = []
+    lag_max_by_group: Dict[str, float] = {}
+    lag_min_by_group: Dict[str, float] = {}
+    lag_sum_by_group_topic: Dict[Tuple[str, str], float] = defaultdict(float)
+    lag_velocity_by_group_topic: Dict[Tuple[str, str], float] = {}
     allowed_metrics = {
         "klag_consumer_lag",
         "klag_consumer_lag_sum",
@@ -541,6 +545,15 @@ def scrape_klag(ts_iso: str) -> List[Dict]:
                 }
             )
 
+        if name == "klag_consumer_lag_max" and group:
+            lag_max_by_group[group] = value
+        if name == "klag_consumer_lag_min" and group:
+            lag_min_by_group[group] = value
+        if name == "klag_consumer_lag" and group and topic:
+            lag_sum_by_group_topic[(group, topic)] += value
+        if name == "klag_consumer_lag_velocity" and group and topic:
+            lag_velocity_by_group_topic[(group, topic)] = value
+
         if name == "klag_consumer_lag_retention_percent" and group:
             risk_code, risk_label = klag_retention_risk(value)
             risk_doc: Dict = {
@@ -555,6 +568,59 @@ def scrape_klag(ts_iso: str) -> List[Dict]:
             if topic:
                 risk_doc["topic"] = topic
             docs.append(risk_doc)
+
+    for group_topic in sorted(set(lag_sum_by_group_topic) | set(lag_velocity_by_group_topic)):
+        group, topic = group_topic
+        lag_sum = float(lag_sum_by_group_topic.get(group_topic, 0.0))
+        velocity = float(lag_velocity_by_group_topic.get(group_topic, 0.0))
+
+        # Estimated close time in seconds:
+        # - finite value when lag is shrinking (negative velocity)
+        # - 0 when lag already zero
+        # - -1 when lag is not closing at current trend
+        if lag_sum <= 0.0:
+            estimate = 0.0
+            closable = 1.0
+        elif velocity < 0.0:
+            estimate = lag_sum / abs(velocity)
+            closable = 1.0
+        else:
+            estimate = -1.0
+            closable = 0.0
+
+        docs.append(
+            {
+                "@timestamp": ts_iso,
+                "source": "klag",
+                "metric": "klag_consumer_lag_time_to_close_estimate_seconds",
+                "group": group,
+                "topic": topic,
+                "value": estimate,
+            }
+        )
+        docs.append(
+            {
+                "@timestamp": ts_iso,
+                "source": "klag",
+                "metric": "klag_consumer_lag_closable",
+                "group": group,
+                "topic": topic,
+                "value": closable,
+            }
+        )
+
+    for group in sorted(set(lag_max_by_group) | set(lag_min_by_group)):
+        max_lag = lag_max_by_group.get(group, 0.0)
+        min_lag = lag_min_by_group.get(group, 0.0)
+        docs.append(
+            {
+                "@timestamp": ts_iso,
+                "source": "klag",
+                "metric": "klag_consumer_lag_skew",
+                "group": group,
+                "value": max(0.0, max_lag - min_lag),
+            }
+        )
 
     return docs
 
