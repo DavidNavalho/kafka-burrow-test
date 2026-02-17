@@ -247,6 +247,108 @@ def status_code(status: str) -> int:
     return STATUS_TO_CODE.get(status.upper(), STATUS_TO_CODE["UNKNOWN"])
 
 
+def traditional_lag_status_code(total_lag: float) -> int:
+    if total_lag < 100.0:
+        return 0
+    if total_lag < 1000.0:
+        return 1
+    return 2
+
+
+def append_snapshot_count_docs(ts_iso: str, docs: List[Dict]) -> None:
+    # Traditional snapshot: classify current total lag per group.
+    traditional_lag_by_group: Dict[str, float] = {}
+    for doc in docs:
+        if (
+            doc.get("source") == "traditional"
+            and doc.get("metric") == "traditional_group_total_lag"
+            and "group" in doc
+        ):
+            traditional_lag_by_group[str(doc["group"])] = float(doc.get("value", 0.0))
+
+    traditional_counts = {0: 0, 1: 0, 2: 0}
+    for total_lag in traditional_lag_by_group.values():
+        traditional_counts[traditional_lag_status_code(total_lag)] += 1
+
+    for code, status in ((0, "GREEN"), (1, "YELLOW"), (2, "RED")):
+        docs.append(
+            {
+                "@timestamp": ts_iso,
+                "source": "traditional",
+                "metric": "traditional_group_health_count",
+                "status": status,
+                "status_code": code,
+                "value": float(traditional_counts[code]),
+            }
+        )
+
+    # Burrow snapshot: map status code into OK/WARN/ERR+ buckets per group.
+    burrow_status_by_group: Dict[str, int] = {}
+    for doc in docs:
+        if (
+            doc.get("source") == "burrow"
+            and doc.get("metric") == "burrow_group_status_code"
+            and "group" in doc
+        ):
+            code = int(doc.get("status_code", doc.get("value", STATUS_TO_CODE["UNKNOWN"])))
+            burrow_status_by_group[str(doc["group"])] = code
+
+    burrow_counts = {0: 0, 1: 0, 2: 0}
+    for code in burrow_status_by_group.values():
+        if code == 0:
+            burrow_counts[0] += 1
+        elif code == 1:
+            burrow_counts[1] += 1
+        else:
+            burrow_counts[2] += 1
+
+    for code, status in ((0, "OK"), (1, "WARN"), (2, "ERRPLUS")):
+        docs.append(
+            {
+                "@timestamp": ts_iso,
+                "source": "burrow",
+                "metric": "burrow_group_health_count",
+                "status": status,
+                "status_code": code,
+                "value": float(burrow_counts[code]),
+            }
+        )
+
+    # KLag snapshot: use derived retention risk code; if multiple topics per group exist,
+    # keep the worst current risk for that group.
+    klag_risk_by_group: Dict[str, int] = {}
+    for doc in docs:
+        if (
+            doc.get("source") == "klag"
+            and doc.get("metric") == "klag_retention_risk_code"
+            and "group" in doc
+        ):
+            group = str(doc["group"])
+            code = int(doc.get("status_code", doc.get("value", 0.0)))
+            klag_risk_by_group[group] = max(klag_risk_by_group.get(group, 0), code)
+
+    klag_counts = {0: 0, 1: 0, 2: 0}
+    for code in klag_risk_by_group.values():
+        if code <= 0:
+            klag_counts[0] += 1
+        elif code == 1:
+            klag_counts[1] += 1
+        else:
+            klag_counts[2] += 1
+
+    for code, status in ((0, "GREEN"), (1, "YELLOW"), (2, "RED")):
+        docs.append(
+            {
+                "@timestamp": ts_iso,
+                "source": "klag",
+                "metric": "klag_group_retention_count",
+                "status": status,
+                "status_code": code,
+                "value": float(klag_counts[code]),
+            }
+        )
+
+
 def scrape_burrow(ts_iso: str) -> List[Dict]:
     docs: List[Dict] = []
 
@@ -504,6 +606,7 @@ def run_once() -> None:
         LOGGER.error("Failed scraping KLag: %s", error)
 
     try:
+        append_snapshot_count_docs(timestamp, docs)
         bulk_index(docs)
     except Exception as error:  # pylint: disable=broad-except
         LOGGER.error("Failed indexing docs: %s", error)

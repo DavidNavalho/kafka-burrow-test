@@ -9,7 +9,6 @@ docker compose up -d --build
 ```
 
 2. Open Grafana dashboards:
-- Legacy comparison dashboard: [http://localhost:3000/d/burrow-vs-traditional/](http://localhost:3000/d/burrow-vs-traditional/)
 - Traditional only: [http://localhost:3000/d/traditional-kafka-metrics/traditional-kafka-metrics](http://localhost:3000/d/traditional-kafka-metrics/traditional-kafka-metrics)
 - Burrow only: [http://localhost:3000/d/burrow-evaluated-lag/burrow-evaluated-lag](http://localhost:3000/d/burrow-evaluated-lag/burrow-evaluated-lag)
 - KLag only: [http://localhost:3000/d/klag-dlp-monitor/klag-data-loss-prevention](http://localhost:3000/d/klag-dlp-monitor/klag-data-loss-prevention)
@@ -56,7 +55,6 @@ Topic layout:
 - **Traditional - Kafka Metrics**: raw lag, consume rates, produced vs consumed offsets, plus threshold-based status lights.
 - **Burrow - Evaluated Lag**: Burrow status (`OK/WARN/ERR/STOP/...`), bad partitions, max lag, and completeness.
 - **KLag - Data Loss Prevention**: lag retention percent, lag age (ms), group state, and derived retention risk code (`GREEN/YELLOW/RED`).
-- **Legacy dashboard**: preserved for side-by-side continuity.
 
 ## Stop
 
